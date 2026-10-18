@@ -15,16 +15,16 @@ module ip_tiles #(
     output wire       audio,
     output reg  [5:0] rgb
 );
-    localparam IDX_W = $clog2(MAX_TILES);
+    localparam IDX_W    = $clog2(MAX_TILES);
+    localparam HIT_Y_HI = HIT_Y + HIT_ZONE;
 
     // ------------------------------------------------------------------
     // button edge detection
     // ------------------------------------------------------------------
     reg  [3:0] btn_prev;
     always @(posedge clk) btn_prev <= btn;
-    wire [3:0] btn_pushed = btn & ~btn_prev;
-    wire       any_pushed = |btn_pushed;
-
+    wire [3:0] btn_pushed  = btn & ~btn_prev;
+    wire       any_pushed  = |btn_pushed;
     wire [3:0] lane_active = btn;
 
     // ------------------------------------------------------------------
@@ -70,17 +70,16 @@ module ip_tiles #(
     // ------------------------------------------------------------------
     // tile geometry + zone checks
     // ------------------------------------------------------------------
-    wire [10:0] tile_bottom [0:MAX_TILES-1];
+    wire [10:0]          tile_bottom [0:MAX_TILES-1];
     wire [MAX_TILES-1:0] in_zone, miss_vec, hittable;
     genvar g;
     generate
         for (g = 0; g < MAX_TILES; g = g + 1) begin : tile_eval
             assign tile_bottom[g] = {1'b0, tile_y[g]} + TILE_H;
-            assign miss_vec[g]    = tile_alive[g]
-                                    && (tile_bottom[g] > HIT_Y + HIT_ZONE);
+            assign miss_vec[g]    = tile_alive[g] && (tile_bottom[g] >  HIT_Y_HI);
             assign in_zone[g]     = tile_alive[g]
                                     && (tile_bottom[g] >= HIT_Y)
-                                    && (tile_bottom[g] <= HIT_Y + HIT_ZONE);
+                                    && (tile_bottom[g] <= HIT_Y_HI);
             assign hittable[g]    = in_zone[g] && btn_pushed[tile_lane[g]];
         end
     endgenerate
@@ -88,46 +87,42 @@ module ip_tiles #(
     wire any_hit  = |hittable;
     wire any_miss = |miss_vec;
 
-    wire [3:0] lane_has_tile;
-    generate
-        for (g = 0; g < 4; g = g + 1) begin : lane_pres
-            wire [MAX_TILES-1:0] hits_lane;
-            for (genvar t = 0; t < MAX_TILES; t = t + 1) begin : per_tile
-                assign hits_lane[t] = in_zone[t] && (tile_lane[t] == g[1:0]);
-            end
-            assign lane_has_tile[g] = |hits_lane;
-        end
-    endgenerate
+    // Which lanes currently contain a tile inside the hit zone?
+    reg [3:0] lane_has_tile;
+    integer li;
+    always @(*) begin
+        lane_has_tile = 4'd0;
+        for (li = 0; li < MAX_TILES; li = li + 1)
+            if (in_zone[li]) lane_has_tile[tile_lane[li]] = 1'b1;
+    end
 
     wire [3:0] wrong_press     = btn_pushed & ~lane_has_tile;
     wire       any_wrong_press = |wrong_press;
-
-    wire progress_up   =  any_hit && !any_wrong_press;
-    wire progress_down = !any_hit &&  any_wrong_press;
+    wire       progress_up     =  any_hit && !any_wrong_press;
+    wire       progress_down   = !any_hit &&  any_wrong_press;
 
     // ------------------------------------------------------------------
-    // spawn slot finder
+    // spawn slot finder (lowest free index wins, as before)
     // ------------------------------------------------------------------
     reg [IDX_W-1:0] spawn_idx;
     reg             spawn_slot_free;
+    integer ki;
     always @(*) begin
-        integer kk;
         spawn_idx       = {IDX_W{1'b0}};
         spawn_slot_free = 1'b0;
-        for (kk = MAX_TILES-1; kk >= 0; kk = kk - 1)
-            if (!tile_alive[kk]) begin
-                spawn_idx       = kk[IDX_W-1:0];
+        for (ki = MAX_TILES-1; ki >= 0; ki = ki - 1)
+            if (!tile_alive[ki]) begin
+                spawn_idx       = ki[IDX_W-1:0];
                 spawn_slot_free = 1'b1;
             end
     end
 
-    wire [1:0]  next_lane    = lfsr[1:0];
-    wire [10:0] next_lane_x  = 11'd20
-                             + {2'd0, next_lane, 7'd0}
-                             + {4'd0, next_lane, 5'd0};
+    wire [1:0]  next_lane   = lfsr[1:0];
+    wire [10:0] next_lane_x = 11'd20
+                            + {2'd0, next_lane, 7'd0}   // lane * 128
+                            + {4'd0, next_lane, 5'd0};  // lane * 32
 
-    wire spawn_due   = step && !ended
-                       && (spawn_count >= interval_cur - 6'd1);
+    wire spawn_due   = step && !ended && (spawn_count >= interval_cur - 6'd1);
     wire spawn_pulse = spawn_due && spawn_slot_free;
 
     // ------------------------------------------------------------------
@@ -135,14 +130,13 @@ module ip_tiles #(
     // ------------------------------------------------------------------
     generate
         for (g = 0; g < MAX_TILES; g = g + 1) begin : tile_state
-            localparam [IDX_W-1:0] G_IDX = g;
             always @(posedge clk) begin
                 if (!rst_n || restart_clear) begin
                     tile_alive[g] <= 1'b0;
                     tile_y[g]     <= 10'd0;
                     tile_lane[g]  <= 2'd0;
                     tile_x[g]     <= 11'd20;
-                end else if (spawn_pulse && (spawn_idx == G_IDX)) begin
+                end else if (spawn_pulse && (spawn_idx == g[IDX_W-1:0])) begin
                     tile_alive[g] <= 1'b1;
                     tile_y[g]     <= 10'd0;
                     tile_lane[g]  <= next_lane;
@@ -157,7 +151,7 @@ module ip_tiles #(
     endgenerate
 
     // ------------------------------------------------------------------
-    // LFSR feedback path (combinational, 8-bit maximal polynomial)
+    // LFSR feedback (8-bit maximal polynomial)
     // ------------------------------------------------------------------
     wire [7:0] lfsr_feedback = {lfsr[6:0], lfsr[7]^lfsr[5]^lfsr[4]^lfsr[3]};
 
@@ -169,7 +163,7 @@ module ip_tiles #(
             spawn_count    <= 6'd0;
             level_progress <= 4'd0;
             level          <= 3'd1;
-            ended          <= 1'b1;      // start on red screen
+            ended          <= 1'b1;          // start on red screen
             is_win         <= 1'b0;
             lfsr           <= 8'hA5;
         end else if (restart_clear) begin
@@ -225,15 +219,13 @@ module ip_tiles #(
     wire [MAX_TILES-1:0] tile_pixel;
     generate
         for (g = 0; g < MAX_TILES; g = g + 1) begin : tile_render
-            wire [10:0] x11   = {1'b0, x};
-            wire [10:0] y11   = {1'b0, y};
-            wire [10:0] tx_lo = tile_x[g];
-            wire [10:0] tx_hi = tile_x[g] + TILE_W;
-            wire [10:0] ty_lo = {1'b0, tile_y[g]};
-            wire [10:0] ty_hi = ty_lo + TILE_H;
+            wire [10:0] x11 = {1'b0, x};
+            wire [10:0] y11 = {1'b0, y};
             assign tile_pixel[g] = tile_alive[g]
-                                   && (x11 >= tx_lo) && (x11 < tx_hi)
-                                   && (y11 >= ty_lo) && (y11 < ty_hi);
+                                   && (x11 >= tile_x[g])
+                                   && (x11 <  tile_x[g] + TILE_W)
+                                   && (y11 >= {1'b0, tile_y[g]})
+                                   && (y11 <  {1'b0, tile_y[g]} + TILE_H);
         end
     endgenerate
     wire any_tile_pixel = |tile_pixel;
@@ -251,7 +243,7 @@ module ip_tiles #(
 
     reg ended_prev;
     always @(posedge clk) begin
-        if (!rst_n) ended_prev <= 1'b1;      // match startup ended=1 → no rise
+        if (!rst_n) ended_prev <= 1'b1;        // match startup ended=1 → no rise
         else        ended_prev <= ended;
     end
     wire ended_rise = ended & ~ended_prev;
@@ -262,7 +254,6 @@ module ip_tiles #(
     reg  [2:0] mel_note;
     reg  [4:0] mel_timer;
     reg  [7:0] mel_period;
-
     wire melody_active = (mel_type != 3'd0);
 
     always @(posedge clk) begin
@@ -272,43 +263,30 @@ module ip_tiles #(
             mel_timer  <= 5'd0;
             mel_period <= 8'd50;
         end else if (win_rise) begin
-            // Do — first note of the victory jingle
             mel_type   <= 3'd1;
             mel_note   <= 3'd0;
             mel_timer  <= 5'd3;
-            mel_period <= 8'd47;    // C6 (Do) ~1042 Hz
+            mel_period <= 8'd47;                // C6 (Do)
         end else if (loss_rise) begin
-            // Sad trombone: first note Bb3
             mel_type   <= 3'd2;
             mel_note   <= 3'd0;
             mel_timer  <= 5'd5;
-            mel_period <= 8'd214;   // Bb3 ~233 Hz
+            mel_period <= 8'd214;               // Bb3
         end else if (step && mel_type != 3'd0) begin
             if (mel_timer != 5'd0) begin
                 mel_timer <= mel_timer - 5'd1;
+            end else if (mel_note < 3'd3) begin
+                mel_note   <= mel_note + 3'd1;
+                mel_period <= (mel_type == 3'd1)
+                              ? ((mel_note == 3'd0) ? 8'd37 :
+                                 (mel_note == 3'd1) ? 8'd31 : 8'd23)
+                              : ((mel_note == 3'd0) ? 8'd226 :
+                                 (mel_note == 3'd1) ? 8'd240 : 8'd254);
+                mel_timer  <= (mel_note == 3'd2)
+                              ? ((mel_type == 3'd1) ? 5'd25 : 5'd28)
+                              : ((mel_type == 3'd1) ? 5'd3  : 5'd5);
             end else begin
-                if (mel_type == 3'd1) begin
-                    // Victory: Do → Mi → Sol → Do (held)
-                    if (mel_note < 3'd3) begin
-                        case (mel_note)
-                            3'd0: begin mel_period <= 8'd37; mel_timer <= 5'd3;  end // E6 (Mi)
-                            3'd1: begin mel_period <= 8'd31; mel_timer <= 5'd3;  end // G6 (Sol)
-                            3'd2: begin mel_period <= 8'd23; mel_timer <= 5'd25; end // C7 (Do) HELD
-                            default: begin end                                                  // unreachable (guarded above)
-                        endcase
-                        mel_note <= mel_note + 3'd1;
-                    end else mel_type <= 3'd0;
-                end else begin
-                    // Sad trombone: A3 → Ab3 → G3 (held)
-                    case (mel_note)
-                        3'd0: begin mel_period <= 8'd226; mel_timer <= 5'd5;  end  // A3
-                        3'd1: begin mel_period <= 8'd240; mel_timer <= 5'd5;  end  // Ab3
-                        3'd2: begin mel_period <= 8'd254; mel_timer <= 5'd28; end  // G3 HELD
-                        default: mel_type <= 3'd0;
-                    endcase
-                    if (mel_note < 3'd3)
-                        mel_note <= mel_note + 3'd1;
-                end
+                mel_type <= 3'd0;
             end
         end
     end
@@ -317,19 +295,20 @@ module ip_tiles #(
     integer i;
     always @(*) begin
         hit_lane = 2'd0;
-        for (i = MAX_TILES-1; i >= 0; i = i - 1)
+        for (i = 0; i < MAX_TILES; i = i + 1)
             if (hittable[i]) hit_lane = tile_lane[i];
     end
 
     // Hit tones: Do · Mi · Sol · Do
-    wire [7:0] hit_period = (hit_lane == 2'd0) ? 8'd47 :   // C6 (Do)
-                            (hit_lane == 2'd1) ? 8'd37 :   // E6 (Mi)
-                            (hit_lane == 2'd2) ? 8'd31 :   // G6 (Sol)
-                                                 8'd23;    // C7 (Do)
+    wire [7:0] hit_period = (hit_lane == 2'd0) ? 8'd47 :
+                            (hit_lane == 2'd1) ? 8'd37 :
+                            (hit_lane == 2'd2) ? 8'd31 :
+                                                 8'd23;
 
     wire snd_hit   = any_hit         && !melody_active && !win_rise;
     wire snd_miss  = any_miss        && !any_hit && !melody_active && !loss_rise;
-    wire snd_wrong = any_wrong_press && !any_hit && !any_miss && !melody_active && !restart_clear;
+    wire snd_wrong = any_wrong_press && !any_hit && !any_miss
+                     && !melody_active && !restart_clear;
 
     reg  [2:0] dur_steps;
     reg  [7:0] tone_period;
@@ -382,22 +361,18 @@ module ip_tiles #(
     // ==================================================================
     // HUD
     // ==================================================================
-
-    // 5-segment progress bar
     wire [9:0] bar_right = ({7'd0, level} << 7)
                          + ({6'd0, level_progress} << 3)
                          - 10'd120;
     wire bar_pixel = (y < 10'd8) && (x < bar_right);
 
-    wire [2:0] bar_seg   = x[9:7];
-    wire [5:0] bar_color = (bar_seg == 3'd0) ? 6'b00_11_00 :
-                           (bar_seg == 3'd1) ? 6'b11_11_00 :
-                           (bar_seg == 3'd2) ? 6'b11_10_00 :
-                           (bar_seg == 3'd3) ? 6'b11_00_00 :
-                                               6'b11_00_11;
+    wire [5:0] bar_color = (x[9:7] == 3'd0) ? 6'b00_11_00 :
+                           (x[9:7] == 3'd1) ? 6'b11_11_00 :
+                           (x[9:7] == 3'd2) ? 6'b11_10_00 :
+                           (x[9:7] == 3'd3) ? 6'b11_00_00 :
+                                              6'b11_00_11;
 
-    wire [10:0] y11_hud = {1'b0, y};
-    wire on_hit_line = (y11_hud >= HIT_Y) && (y11_hud < HIT_Y + 11'd2);
+    wire on_hit_line = (y >= HIT_Y) && (y < HIT_Y + 11'd2);
 
     wire [1:0] x_lane = (x < 10'd160) ? 2'd0 :
                         (x < 10'd320) ? 2'd1 :
