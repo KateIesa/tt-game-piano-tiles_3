@@ -51,7 +51,6 @@ module ip_tiles #(
     reg  [2:0] level;
     reg        ended;
     reg        is_win;
-    reg        first_run;
 
     reg  [4:0] speed_cur;
     reg  [5:0] interval_cur;
@@ -158,7 +157,7 @@ module ip_tiles #(
     endgenerate
 
     // ------------------------------------------------------------------
-    // LFSR feedback path (combinational)
+    // LFSR feedback path (combinational, 8-bit maximal polynomial)
     // ------------------------------------------------------------------
     wire [7:0] lfsr_feedback = {lfsr[6:0], lfsr[7]^lfsr[5]^lfsr[4]^lfsr[3]};
 
@@ -170,9 +169,8 @@ module ip_tiles #(
             spawn_count    <= 6'd0;
             level_progress <= 4'd0;
             level          <= 3'd1;
-            ended          <= 1'b1;
+            ended          <= 1'b1;      // start on red screen
             is_win         <= 1'b0;
-            first_run      <= 1'b1;
             lfsr           <= 8'hA5;
         end else if (restart_clear) begin
             spawn_count    <= 6'd0;
@@ -180,8 +178,6 @@ module ip_tiles #(
             level          <= 3'd1;
             ended          <= 1'b0;
             is_win         <= 1'b0;
-            first_run      <= 1'b0;
-            // 4-bit btn ^ 4-bit entropy → zero-extend → XOR with 8-bit lfsr
             lfsr           <= (lfsr ^ {4'b0, btn_pushed ^ entropy_ctr}) | 8'h01;
         end else if (!ended) begin
             if (spawn_due) begin
@@ -255,12 +251,12 @@ module ip_tiles #(
 
     reg ended_prev;
     always @(posedge clk) begin
-        if (!rst_n) ended_prev <= 1'b0;
+        if (!rst_n) ended_prev <= 1'b1;      // match startup ended=1 → no rise
         else        ended_prev <= ended;
     end
     wire ended_rise = ended & ~ended_prev;
-    wire win_rise   = ended_rise &  is_win & ~first_run;
-    wire loss_rise  = ended_rise & ~is_win & ~first_run;
+    wire win_rise   = ended_rise &  is_win;
+    wire loss_rise  = ended_rise & ~is_win;
 
     reg  [2:0] mel_type;
     reg  [2:0] mel_note;
@@ -276,34 +272,38 @@ module ip_tiles #(
             mel_timer  <= 5'd0;
             mel_period <= 8'd50;
         end else if (win_rise) begin
+            // Do — first note of the victory jingle
             mel_type   <= 3'd1;
             mel_note   <= 3'd0;
             mel_timer  <= 5'd3;
-            mel_period <= 8'd47;
+            mel_period <= 8'd47;    // C6 (Do) ~1042 Hz
         end else if (loss_rise) begin
+            // Sad trombone: first note Bb3
             mel_type   <= 3'd2;
             mel_note   <= 3'd0;
             mel_timer  <= 5'd5;
-            mel_period <= 8'd214;
+            mel_period <= 8'd214;   // Bb3 ~233 Hz
         end else if (step && mel_type != 3'd0) begin
             if (mel_timer != 5'd0) begin
                 mel_timer <= mel_timer - 5'd1;
             end else begin
                 if (mel_type == 3'd1) begin
+                    // Victory: Do → Mi → Sol → Do (held)
                     if (mel_note < 3'd3) begin
                         case (mel_note)
-                            3'd0: begin mel_period <= 8'd37; mel_timer <= 5'd3;  end
-                            3'd1: begin mel_period <= 8'd31; mel_timer <= 5'd3;  end
-                            3'd2: begin mel_period <= 8'd23; mel_timer <= 5'd25; end
-                            default: begin end
+                            3'd0: begin mel_period <= 8'd37; mel_timer <= 5'd3;  end // E6 (Mi)
+                            3'd1: begin mel_period <= 8'd31; mel_timer <= 5'd3;  end // G6 (Sol)
+                            3'd2: begin mel_period <= 8'd23; mel_timer <= 5'd25; end // C7 (Do) HELD
+                            default: begin end                                                  // unreachable (guarded above)
                         endcase
                         mel_note <= mel_note + 3'd1;
                     end else mel_type <= 3'd0;
                 end else begin
+                    // Sad trombone: A3 → Ab3 → G3 (held)
                     case (mel_note)
-                        3'd0: begin mel_period <= 8'd226; mel_timer <= 5'd5;  end
-                        3'd1: begin mel_period <= 8'd240; mel_timer <= 5'd5;  end
-                        3'd2: begin mel_period <= 8'd254; mel_timer <= 5'd28; end
+                        3'd0: begin mel_period <= 8'd226; mel_timer <= 5'd5;  end  // A3
+                        3'd1: begin mel_period <= 8'd240; mel_timer <= 5'd5;  end  // Ab3
+                        3'd2: begin mel_period <= 8'd254; mel_timer <= 5'd28; end  // G3 HELD
                         default: mel_type <= 3'd0;
                     endcase
                     if (mel_note < 3'd3)
@@ -321,13 +321,14 @@ module ip_tiles #(
             if (hittable[i]) hit_lane = tile_lane[i];
     end
 
-    wire [7:0] hit_period = (hit_lane == 2'd0) ? 8'd47 :
-                            (hit_lane == 2'd1) ? 8'd37 :
-                            (hit_lane == 2'd2) ? 8'd31 :
-                                                 8'd23;
+    // Hit tones: Do · Mi · Sol · Do
+    wire [7:0] hit_period = (hit_lane == 2'd0) ? 8'd47 :   // C6 (Do)
+                            (hit_lane == 2'd1) ? 8'd37 :   // E6 (Mi)
+                            (hit_lane == 2'd2) ? 8'd31 :   // G6 (Sol)
+                                                 8'd23;    // C7 (Do)
 
-    wire snd_hit   = any_hit         && !melody_active && !win_rise  && !restart_clear;
-    wire snd_miss  = any_miss        && !any_hit && !melody_active && !loss_rise && !restart_clear;
+    wire snd_hit   = any_hit         && !melody_active && !win_rise;
+    wire snd_miss  = any_miss        && !any_hit && !melody_active && !loss_rise;
     wire snd_wrong = any_wrong_press && !any_hit && !any_miss && !melody_active && !restart_clear;
 
     reg  [2:0] dur_steps;
@@ -381,6 +382,8 @@ module ip_tiles #(
     // ==================================================================
     // HUD
     // ==================================================================
+
+    // 5-segment progress bar
     wire [9:0] bar_right = ({7'd0, level} << 7)
                          + ({6'd0, level_progress} << 3)
                          - 10'd120;
