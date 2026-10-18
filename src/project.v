@@ -30,5 +30,5 @@ module tt_um_kateiesa_game_piano_tiles_3 (
     assign uio_out = {7'd0, audio};    // uio[0] = audio
     assign uio_oe  = 8'd1;             // only uio[0] is driven
 
-    wire _unused = &{ena, uio_in[7:1], ui_in[7:4], 1'b0};
+    wire _unused = &{ena, ui_in[7:4], 1'b0};
 endmodule

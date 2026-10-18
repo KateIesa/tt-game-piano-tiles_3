@@ -28,12 +28,12 @@ module ip_tiles #(
     wire [3:0] lane_active = btn;
 
     // ------------------------------------------------------------------
-    // free-running entropy counter (varies with press timing)
+    // 4-bit free-running entropy counter
     // ------------------------------------------------------------------
-    reg  [7:0] entropy_ctr;
+    reg  [3:0] entropy_ctr;
     always @(posedge clk) begin
-        if (!rst_n) entropy_ctr <= 8'd0;
-        else        entropy_ctr <= entropy_ctr + 8'd1;
+        if (!rst_n) entropy_ctr <= 4'd0;
+        else        entropy_ctr <= entropy_ctr + 4'd1;
     end
 
     // ------------------------------------------------------------------
@@ -51,7 +51,7 @@ module ip_tiles #(
     reg  [2:0] level;
     reg        ended;
     reg        is_win;
-    reg        first_run;              // ← 1 until first button press
+    reg        first_run;
 
     reg  [4:0] speed_cur;
     reg  [5:0] interval_cur;
@@ -170,29 +170,30 @@ module ip_tiles #(
             spawn_count    <= 6'd0;
             level_progress <= 4'd0;
             level          <= 3'd1;
-            ended          <= 1'b1;      // ← startup shows "ended" screen
-            is_win         <= 1'b0;      // ← red, not green
-            first_run      <= 1'b1;      // ← suppress startup sound
-            lfsr           <= 8'hA5;     //   placeholder; re-seeded on first press
+            ended          <= 1'b1;
+            is_win         <= 1'b0;
+            first_run      <= 1'b1;
+            lfsr           <= 8'hA5;
         end else if (restart_clear) begin
             spawn_count    <= 6'd0;
             level_progress <= 4'd0;
             level          <= 3'd1;
-            ended          <= 1'b0;      // ← start the game
+            ended          <= 1'b0;
             is_win         <= 1'b0;
             first_run      <= 1'b0;
-            lfsr           <= (lfsr ^ {4'b0, btn_pushed} ^ entropy_ctr) | 8'h01;
+            // 4-bit btn ^ 4-bit entropy → zero-extend → XOR with 8-bit lfsr
+            lfsr           <= (lfsr ^ {4'b0, btn_pushed ^ entropy_ctr}) | 8'h01;
         end else if (!ended) begin
             if (spawn_due) begin
                 spawn_count <= 6'd0;
                 if (spawn_pulse)
-                    lfsr <= lfsr_feedback ^ entropy_ctr;
+                    lfsr <= lfsr_feedback ^ {4'b0, entropy_ctr};
             end else if (step) begin
                 spawn_count <= spawn_count + 6'd1;
             end
 
             if (any_pushed)
-                lfsr <= lfsr ^ entropy_ctr;
+                lfsr <= lfsr ^ {4'b0, entropy_ctr};
 
             if (progress_up) begin
                 if (level_progress == LEVEL_UP_AT) begin
@@ -258,8 +259,8 @@ module ip_tiles #(
         else        ended_prev <= ended;
     end
     wire ended_rise = ended & ~ended_prev;
-    wire win_rise   = ended_rise &  is_win & ~first_run;   // ← gated
-    wire loss_rise  = ended_rise & ~is_win & ~first_run;   // ← gated
+    wire win_rise   = ended_rise &  is_win & ~first_run;
+    wire loss_rise  = ended_rise & ~is_win & ~first_run;
 
     reg  [2:0] mel_type;
     reg  [2:0] mel_note;
@@ -325,8 +326,6 @@ module ip_tiles #(
                             (hit_lane == 2'd2) ? 8'd31 :
                                                  8'd23;
 
-    // sound triggers gated on !restart_clear so the press-to-start /
-    // press-to-restart cycle is silent
     wire snd_hit   = any_hit         && !melody_active && !win_rise  && !restart_clear;
     wire snd_miss  = any_miss        && !any_hit && !melody_active && !loss_rise && !restart_clear;
     wire snd_wrong = any_wrong_press && !any_hit && !any_miss && !melody_active && !restart_clear;
